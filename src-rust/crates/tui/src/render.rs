@@ -1085,14 +1085,16 @@ fn append_turn_items(
                 }
             }
             StreamSegment::ToolUse { block, .. } => {
-                // Active turn: collapse completed tools into a one-liner
-                // so only the running tool gets the full animated block.
-                if turn.active && block.status == ToolStatus::Done {
+                // When rendering from segments (active or just-completed turn),
+                // collapse Done tools into compact one-liners. Only the
+                // Running tool gets the full animated block.
+                // This prevents a visual jump when the turn transitions
+                // from active → inactive.
+                if block.status == ToolStatus::Done {
                     let compact = compact_tool_line(block);
                     sections.push((vec![compact], Some(turn.primary_message_index())));
                 } else {
-                    // Full render for Running/Error tools, or any tool on a
-                    // completed turn.
+                    // Full render for Running/Error tools
                     let mut lines = Vec::new();
                     render_tool_block_lines(&mut lines, block, frame_count);
                     if !lines.is_empty() {
