@@ -25,6 +25,9 @@ pub trait VirtualItem {
     fn is_section_header(&self) -> bool {
         false
     }
+
+    /// Return a value that changes when item content changes (for cache invalidation)
+    fn content_version(&self) -> u64 { 0 }
 }
 
 /// Virtual scrolling list.
@@ -32,8 +35,8 @@ pub struct VirtualList<T: VirtualItem> {
     /// All items (messages, results, etc.).
     pub items: Vec<T>,
 
-    /// Height cache: (item_index, terminal_width) → row_count.
-    height_cache: HashMap<(usize, u16), u16>,
+    /// Height cache: (item_index, content_version, terminal_width) → row_count.
+    height_cache: HashMap<(usize, u64, u16), u16>,
 
     /// Current scroll offset in rows from the top of all items.
     pub scroll_offset: u16,
@@ -101,7 +104,8 @@ impl<T: VirtualItem> VirtualList<T> {
 
     /// Get the cached height for item `idx` at `width`, computing it if needed.
     fn item_height(&mut self, idx: usize, width: u16) -> u16 {
-        let key = (idx, width);
+        let version = self.items[idx].content_version();
+        let key = (idx, version, width);
         if let Some(&h) = self.height_cache.get(&key) {
             return h;
         }

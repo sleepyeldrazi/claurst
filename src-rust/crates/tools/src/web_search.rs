@@ -1,4 +1,4 @@
-// WebSearch tool: search the web using Brave Search API or fallback to DuckDuckGo.
+// WebSearch tool: search the web using SearXNG, Brave Search API, or fallback to DuckDuckGo.
 //
 // Mirrors the TypeScript WebSearch tool behaviour:
 // - Accepts a query string
@@ -67,8 +67,10 @@ impl Tool for WebSearchTool {
         let num_results = params.num_results.min(10).max(1);
         debug!(query = %params.query, num_results, "Web search");
 
-        // Try Brave Search API first, then fall back to DuckDuckGo
-        if let Some(api_key) = std::env::var("BRAVE_SEARCH_API_KEY").ok().filter(|k| !k.is_empty()) {
+        // Priority: Searxng endpoint > Brave Search > DuckDuckGo
+        if let Some(endpoint) = std::env::var("SEARXNG_ENDPOINT").ok().filter(|e| !e.is_empty()) {
+            search_searxng(&params.query, num_results, &endpoint).await
+        } else if let Some(api_key) = std::env::var("BRAVE_SEARCH_API_KEY").ok().filter(|k| !k.is_empty()) {
             search_brave(&params.query, num_results, &api_key).await
         } else {
             search_duckduckgo(&params.query, num_results).await
@@ -166,6 +168,61 @@ async fn search_duckduckgo(query: &str, num_results: usize) -> ToolResult {
 
     let output = format_ddg_results(&data, num_results);
     ToolResult::success(output)
+}
+
+/// Searxng Custom Endpoint Search.
+/// When SEARXNG_ENDPOINT is set, uses this custom search endpoint.
+async fn search_searxng(query: &str, num_results: usize, endpoint: &str) -> ToolResult {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/search?q={}&format=json&categories=general",
+        endpoint.trim_end_matches('/'),
+        urlencoding_simple(query)
+    );
+
+    let resp = match client
+        .get(&url)
+        .header("User-Agent", "Claurst/1.0")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return ToolResult::error(format!("Searxng search request failed: {}", e)),
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        return ToolResult::error(format!("Searxng returned status {}", status));
+    }
+
+    let data: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return ToolResult::error(format!("Failed to parse Searxng response: {}", e)),
+    };
+
+    let output = format_searxng_results(&data, num_results);
+    ToolResult::success(output)
+}
+
+fn format_searxng_results(data: &Value, max: usize) -> String {
+    let mut output = String::new();
+    let results = data.get("results").and_then(|r| r.as_array());
+
+    if let Some(items) = results {
+        for (i, item) in items.iter().take(max).enumerate() {
+            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("(No title)");
+            let url = item.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let snippet = item.get("content").and_then(|s| s.as_str()).unwrap_or("");
+
+            output.push_str(&format!("{}. **{}**\n   URL: {}\n   {}\n\n", i + 1, title, url, snippet));
+        }
+    }
+
+    if output.is_empty() {
+        "No results found.".to_string()
+    } else {
+        output
+    }
 }
 
 fn format_ddg_results(data: &Value, max: usize) -> String {

@@ -122,7 +122,7 @@ pub mod session_branching;
 // Public re-exports
 // ---------------------------------------------------------------------------
 
-pub use app::{App, try_copy_to_clipboard};
+pub use app::{App, ToolUseBlock, ToolStatus, StreamSegment, try_copy_to_clipboard};
 pub use notifications::NotificationKind;
 pub use input::{is_slash_command, parse_slash_command};
 pub use feedback_survey::{FeedbackSurveyState, FeedbackSurveyStage, FeedbackResponse};
@@ -1002,6 +1002,7 @@ mod tests {
             status: ToolStatus::Running,
             output_preview: None,
             input_json: r#"{"file_path":"foo.rs"}"#.to_string(),
+            stream_pos: 0,
         });
         app.handle_query_event(claurst_query::QueryEvent::ToolEnd {
             tool_name: "Read".to_string(),
@@ -1114,6 +1115,3 @@ mod tests {
         assert_eq!(pr.options[3].key, 'n');
     }
 }
-
-
-

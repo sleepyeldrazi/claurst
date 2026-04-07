@@ -77,6 +77,9 @@ pub struct OpenAiCompatProvider {
     extra_headers: Vec<(String, String)>,
     quirks: ProviderQuirks,
     http_client: reqwest::Client,
+    /// True for local inference servers (Ollama, LM Studio, llama.cpp) that
+    /// never require an API key regardless of hostname.
+    is_local: bool,
 }
 
 impl OpenAiCompatProvider {
@@ -100,12 +103,19 @@ impl OpenAiCompatProvider {
             extra_headers: Vec::new(),
             quirks: ProviderQuirks::default(),
             http_client,
+            is_local: false,
         }
     }
 
     /// Set an API key that will be sent as `Authorization: Bearer <key>`.
     pub fn with_api_key(mut self, key: String) -> Self {
         self.api_key = if key.is_empty() { None } else { Some(key) };
+        self
+    }
+
+    /// Mark this as a local inference server that never requires an API key.
+    pub fn with_local(mut self) -> Self {
+        self.is_local = true;
         self
     }
 
@@ -301,11 +311,22 @@ impl OpenAiCompatProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("HTTP request failed: {}", e),
-                status: None,
-                body: None,
+            .map_err(|e| {
+                let detailed = if e.is_builder() {
+                    format!("HTTP request builder error (check URL '{}', headers, and body): {}", url, e)
+                } else if e.is_connect() {
+                    format!("HTTP connection error (cannot reach '{}'): {}", url, e)
+                } else if e.is_timeout() {
+                    format!("HTTP timeout error: {}", e)
+                } else {
+                    format!("HTTP request failed: {}", e)
+                };
+                ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: detailed,
+                    status: None,
+                    body: None,
+                }
             })?;
 
         let status = resp.status().as_u16();
@@ -380,11 +401,22 @@ impl OpenAiCompatProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Other {
-                provider: self.id.clone(),
-                message: format!("HTTP request failed: {}", e),
-                status: None,
-                body: None,
+            .map_err(|e| {
+                let detailed = if e.is_builder() {
+                    format!("HTTP request builder error (check URL '{}', headers, and body): {}", url, e)
+                } else if e.is_connect() {
+                    format!("HTTP connection error (cannot reach '{}'): {}", url, e)
+                } else if e.is_timeout() {
+                    format!("HTTP timeout error: {}", e)
+                } else {
+                    format!("HTTP request failed: {}", e)
+                };
+                ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: detailed,
+                    status: None,
+                    body: None,
+                }
             })?;
 
         let status = resp.status().as_u16();
@@ -745,7 +777,8 @@ impl LlmProvider for OpenAiCompatProvider {
             // env var was missing or empty; report that clearly.
             //
             // We distinguish by whether the base_url is a localhost address.
-            let is_local = self.base_url.contains("localhost")
+            let is_local = self.is_local
+                || self.base_url.contains("localhost")
                 || self.base_url.contains("127.0.0.1")
                 || self.base_url.contains("::1");
 

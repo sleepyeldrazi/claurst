@@ -932,7 +932,13 @@ pub async fn run_query_loop(
                 || client.api_key_is_empty();
 
             if use_provider_dispatch {
-                let pid = claurst_core::provider_id::ProviderId::new(&provider_id_str);
+                // Normalize aliases: "llamacpp" → "llama-cpp", "lmstudio" → "lm-studio"
+                let provider_id_normalized = match provider_id_str.as_str() {
+                    "llamacpp" => "llama-cpp",
+                    "lmstudio" => "lm-studio",
+                    other => other,
+                };
+                let pid = claurst_core::provider_id::ProviderId::new(provider_id_normalized);
 
                 // Always prefer a fresh provider built from the auth_store so
                 // that keys added at runtime via /connect are picked up
@@ -1129,13 +1135,20 @@ pub async fn run_query_loop(
                                                 }
                                             }
                                             claurst_api::StreamEvent::MessageDelta { stop_reason, usage: u } => {
-                                                stop_str = match stop_reason {
-                                                    Some(claurst_api::provider_types::StopReason::ToolUse) => "tool_use",
-                                                    Some(claurst_api::provider_types::StopReason::MaxTokens) => "max_tokens",
-                                                    _ => "end_turn",
-                                                }.to_string();
+                                                if let Some(sr) = stop_reason {
+                                                    stop_str = match sr {
+                                                        claurst_api::provider_types::StopReason::ToolUse => "tool_use",
+                                                        claurst_api::provider_types::StopReason::MaxTokens => "max_tokens",
+                                                        _ => "end_turn",
+                                                    }.to_string();
+                                                }
                                                 if let Some(u) = u {
-                                                    usage.output_tokens = u.output_tokens;
+                                                    if u.input_tokens > 0 {
+                                                        usage.input_tokens = u.input_tokens;
+                                                    }
+                                                    if u.output_tokens > 0 {
+                                                        usage.output_tokens = u.output_tokens;
+                                                    }
                                                 }
                                             }
                                             claurst_api::StreamEvent::MessageStop => break,
@@ -1289,13 +1302,15 @@ pub async fn run_query_loop(
                 // client path below (which has its own deferred key validation
                 // with detailed model-specific hints).
             }
-        }
+        } else {
+            // Non-Anthropic provider dispatched above, skip client path
+            // to avoid duplicate events from both paths.
 
-        // Send to API
-        debug!(turn, model = %effective_model, "Sending API request");
-        let mut stream_rx = match client.create_message_stream(request, handler).await {
-            Ok(rx) => rx,
-            Err(e) => {
+            // Send to API
+            debug!(turn, model = %effective_model, "Sending API request");
+            let mut stream_rx = match client.create_message_stream(request, handler).await {
+                Ok(rx) => rx,
+                Err(e) => {
                 // On overloaded/rate-limit errors, attempt one switch to the fallback model.
                 let err_str = e.to_string().to_lowercase();
                 if !used_fallback
@@ -1920,6 +1935,7 @@ pub async fn run_query_loop(
                     usage,
                 };
             }
+        }
         }
     }
 }

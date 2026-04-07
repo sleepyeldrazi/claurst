@@ -94,6 +94,36 @@ pub use permissions::{
 };
 
 // ---------------------------------------------------------------------------
+
+// Core query engine with turn loop and streaming (T1-1, T1-2).
+pub mod query_engine;
+pub use query_engine::{
+    QueryEngine, QueryEngineConfig, QueryEngineEvent, TurnResult,
+    StopReason, ToolUseRecord, TurnState,
+    AUTOCOMPACT_BUFFER_TOKENS, WARNING_THRESHOLD_FRACTION, 
+    CRITICAL_THRESHOLD_FRACTION, DEFAULT_MAX_TURNS,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, DEFAULT_TOOL_RESULT_BUDGET,
+    TokenWarningLevel,
+};
+
+// Context compaction for 200K token window management (T1-3).
+pub mod compact;
+pub use compact::{
+    AutoCompactState, CompactConfig, CompactResult, CompactTrigger,
+    CompactionStrategy, CompactionReason, MessageGroup,
+    MicroCompactConfig, TokenWarningState, ContextCollapseConfig,
+    TokenAnalysis, ContentType,
+    should_auto_compact, should_compact, compact_conversation,
+    auto_compact_if_needed, reactive_compact, micro_compact_messages,
+    context_collapse, should_context_collapse, snip_compact,
+    group_messages_by_api_round, calculate_messages_to_keep_index,
+    get_compact_prompt, format_compact_summary, estimate_tokens_for_messages,
+    context_window_for_model, calculate_token_warning_state, analyze_tokens,
+    DEFAULT_CONTEXT_WINDOW, KEEP_RECENT_MESSAGES, AUTOCOMPACT_TRIGGER_FRACTION,
+    MICROCOMPACT_TRIGGER_FRACTION, TIME_BASED_MC_CLEARED_MESSAGE, NO_TOOLS_PREAMBLE,
+    MAX_CONSECUTIVE_FAILURES, DEFAULT_SUMMARY_TARGET_TOKENS,
+};
+
 // error module
 // ---------------------------------------------------------------------------
 pub mod error {
@@ -182,7 +212,7 @@ pub mod types {
 
     // ---- Roles -----------------------------------------------------------
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
     #[serde(rename_all = "lowercase")]
     pub enum Role {
         User,
@@ -1643,7 +1673,7 @@ pub mod permissions {
     // Rule action & scope
     // -----------------------------------------------------------------------
 
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum PermissionAction {
         Allow,
         Deny,

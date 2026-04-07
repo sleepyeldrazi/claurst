@@ -382,6 +382,18 @@ pub struct ToolUseBlock {
     pub output_preview: Option<String>,
     /// JSON-serialised input for the tool call (populated from the API stream).
     pub input_json: String,
+    /// Stream position when this tool was invoked.
+    /// Used to maintain chronological order with other stream segments.
+    pub stream_pos: usize,
+}
+
+/// A segment of the streaming response, tracked in chronological order.
+/// Replaces the separate live_thinking/live_text/tool_blocks accumulation.
+#[derive(Debug, Clone)]
+pub enum StreamSegment {
+    Thinking { content: String, stream_pos: usize },
+    Text { content: String, stream_pos: usize },
+    ToolUse { block: ToolUseBlock, stream_pos: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -621,6 +633,9 @@ pub struct App {
     pub is_streaming: bool,
     pub streaming_text: String,
     pub streaming_thinking: String,
+    /// Stream segments tracked in chronological order (thinking, text, tools interleaved).
+    /// This replaces the separate accumulation and ensures correct render order.
+    pub stream_segments: Vec<StreamSegment>,
     pub status_message: Option<String>,
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
     pub spinner_verb: Option<String>,
@@ -1110,6 +1125,7 @@ impl App {
             is_streaming: false,
             streaming_text: String::new(),
             streaming_thinking: String::new(),
+            stream_segments: Vec::new(),
             status_message: None,
             spinner_verb: None,
             should_quit: false,
@@ -1326,6 +1342,11 @@ impl App {
             .checked_sub(1)
     }
 
+    /// Returns the next stream position for chronological segment ordering.
+    fn next_stream_pos(&self) -> usize {
+        self.stream_segments.len()
+    }
+
     fn current_agent_mode_snapshot(&self) -> String {
         self.agent_mode
             .clone()
@@ -1381,26 +1402,74 @@ impl App {
     }
 
     fn flush_streamed_assistant_message(&mut self) {
-        if self.streaming_text.trim().is_empty() && self.streaming_thinking.trim().is_empty() {
+        // If no stream segments, nothing to flush
+        if self.stream_segments.is_empty() {
             self.streaming_text.clear();
             self.streaming_thinking.clear();
             return;
         }
 
-        let thinking = std::mem::take(&mut self.streaming_thinking);
-        let text = std::mem::take(&mut self.streaming_text);
-
+        // Build content blocks from stream_segments in chronological order
         let mut blocks = Vec::new();
-        if !thinking.trim().is_empty() {
+        let mut current_text = String::new();
+        let mut current_thinking = String::new();
+        
+        for segment in &self.stream_segments {
+            match segment {
+                StreamSegment::Thinking { content, .. } => {
+                    // If we have accumulated text, flush it first
+                    if !current_text.is_empty() {
+                        blocks.push(ContentBlock::Text { text: std::mem::take(&mut current_text) });
+                    }
+                    current_thinking.push_str(content);
+                }
+                StreamSegment::Text { content, .. } => {
+                    // If we have accumulated thinking, flush it first
+                    if !current_thinking.is_empty() {
+                        blocks.push(ContentBlock::Thinking {
+                            thinking: std::mem::take(&mut current_thinking),
+                            signature: String::new(),
+                        });
+                    }
+                    current_text.push_str(content);
+                }
+                StreamSegment::ToolUse { block, .. } => {
+                    // Flush any accumulated text/thinking before the tool use
+                    if !current_thinking.is_empty() {
+                        blocks.push(ContentBlock::Thinking {
+                            thinking: std::mem::take(&mut current_thinking),
+                            signature: String::new(),
+                        });
+                    }
+                    if !current_text.is_empty() {
+                        blocks.push(ContentBlock::Text { text: std::mem::take(&mut current_text) });
+                    }
+                    // Add the tool_use block
+                    blocks.push(ContentBlock::ToolUse {
+                        id: block.id.clone(),
+                        name: block.name.clone(),
+                        input: serde_json::from_str(&block.input_json).unwrap_or(serde_json::Value::Null),
+                    });
+                }
+            }
+        }
+        
+        // Flush any remaining content
+        if !current_thinking.is_empty() {
             blocks.push(ContentBlock::Thinking {
-                thinking,
+                thinking: current_thinking,
                 signature: String::new(),
             });
         }
-        if !text.is_empty() {
-            blocks.push(ContentBlock::Text { text });
+        if !current_text.is_empty() {
+            blocks.push(ContentBlock::Text { text: current_text });
         }
 
+        // Clear legacy fields
+        self.streaming_text.clear();
+        self.streaming_thinking.clear();
+
+        // Create message from blocks
         let msg = match blocks.len() {
             0 => return,
             1 => match blocks.pop().unwrap() {
@@ -1817,6 +1886,7 @@ impl App {
                 self.display_messages.clear();
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
+                self.stream_segments.clear();
                 self.tool_use_blocks.clear();
                 self.turn_metadata.clear();
                 self.invalidate_transcript();
@@ -3363,7 +3433,11 @@ impl App {
                 self.spinner_verb = None;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
-                self.tool_use_blocks.clear();
+                // Keep stream_segments for display — show what was generated
+                // before cancellation.  Cleared when the next turn starts.
+                for block in &mut self.tool_use_blocks {
+                    block.status = ToolStatus::Done;
+                }
                 self.status_message = Some("Cancelled.".to_string());
                 self.complete_current_turn_snapshot(true);
             }
@@ -3385,7 +3459,10 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    // Keep segments for display, mark tools done
+                    for block in &mut self.tool_use_blocks {
+                        block.status = ToolStatus::Done;
+                    }
                     self.status_message = Some("Cancelled.".to_string());
                 } else {
                     self.should_quit = true;
@@ -3943,7 +4020,10 @@ impl App {
                     self.spinner_verb = None;
                     self.streaming_text.clear();
                     self.streaming_thinking.clear();
-                    self.tool_use_blocks.clear();
+                    // Keep segments for display, mark tools done
+                    for block in &mut self.tool_use_blocks {
+                        block.status = ToolStatus::Done;
+                    }
                     self.status_message = Some("Cancelled.".to_string());
                 } else {
                     self.should_quit = true;
@@ -4836,6 +4916,7 @@ impl App {
                         self.last_turn_verb = None;
                     }
                     self.streaming_thinking.clear();
+                    self.streaming_text.clear();
                 }
                 self.is_streaming = true;
                 match stream_evt {
@@ -4845,11 +4926,29 @@ impl App {
                         match delta {
                             claurst_api::streaming::ContentDelta::TextDelta { text } => {
                                 self.streaming_text.push_str(&text);
+                                // Append to stream_segments chronologically
+                                if let Some(StreamSegment::Text { content, .. }) = self.stream_segments.last_mut() {
+                                    content.push_str(&text);
+                                } else {
+                                    self.stream_segments.push(StreamSegment::Text {
+                                        content: text.clone(),
+                                        stream_pos: self.next_stream_pos(),
+                                    });
+                                }
                                 self.invalidate_transcript();
                             }
                             claurst_api::streaming::ContentDelta::ThinkingDelta { thinking } => {
                                 debug!(len = thinking.len(), "Thinking delta received");
                                 self.streaming_thinking.push_str(&thinking);
+                                // Append to stream_segments chronologically
+                                if let Some(StreamSegment::Thinking { content, .. }) = self.stream_segments.last_mut() {
+                                    content.push_str(&thinking);
+                                } else {
+                                    self.stream_segments.push(StreamSegment::Thinking {
+                                        content: thinking.clone(),
+                                        stream_pos: self.next_stream_pos(),
+                                    });
+                                }
                                 self.invalidate_transcript();
                             }
                             _ => {}
@@ -4859,7 +4958,13 @@ impl App {
                         self.is_streaming = false;
                         self.spinner_verb = None;
                         self.stall_start = None;
-                        self.flush_streamed_assistant_message();
+                        // Don't flush here — the agentic loop may continue
+                        // with tool calls and further streaming rounds.
+                        // TurnComplete handles the final flush.
+                        //
+                        // Flushing here caused multiple assistant messages
+                        // per turn: one per MessageStop (which fires between
+                        // tool-use rounds), each with partial content.
                     }
                     _ => {
                         // Any other stream event: if we have no stall_start yet,
@@ -4879,23 +4984,34 @@ impl App {
                 self.is_streaming = true;
                 self.status_message = Some(format!("Running {}…", tool_name));
                 let turn_index = self.current_user_turn_index();
-                if let Some(existing) =
+                let stream_pos = self.next_stream_pos();
+                
+                // Create or update the ToolUseBlock
+                let block = if let Some(existing) =
                     self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id)
                 {
                     existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
-                    existing.input_json = input_json;
+                    existing.input_json = input_json.clone();
+                    existing.stream_pos = stream_pos;
+                    existing.clone()
                 } else {
-                    self.tool_use_blocks.push(ToolUseBlock {
-                        id: tool_id,
-                        name: tool_name,
+                    let new_block = ToolUseBlock {
+                        id: tool_id.clone(),
+                        name: tool_name.clone(),
                         turn_index,
                         status: ToolStatus::Running,
                         output_preview: None,
-                        input_json,
-                    });
-                }
+                        input_json: input_json.clone(),
+                        stream_pos,
+                    };
+                    self.tool_use_blocks.push(new_block.clone());
+                    new_block
+                };
+                
+                // Add to stream_segments for chronological ordering
+                self.stream_segments.push(StreamSegment::ToolUse { block, stream_pos });
                 self.invalidate_transcript();
             }
 
@@ -4953,6 +5069,15 @@ impl App {
                 self.last_turn_verb = Some(sample_completion_verb(seed));
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks.retain(|b| b.status != ToolStatus::Running);
+                // Mark all remaining tool blocks as Done (they were running
+                // but the turn is over).
+                for block in &mut self.tool_use_blocks {
+                    block.status = ToolStatus::Done;
+                }
+                // DON'T clear stream_segments — they stay as the rendering
+                // source so the display doesn't rerender/shift when the turn
+                // transitions from streaming to history.  Segments are cleared
+                // when a new user message starts the next turn.
                 self.complete_current_turn_snapshot(stop_reason.contains("abort") || stop_reason.contains("cancel"));
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
@@ -4967,6 +5092,7 @@ impl App {
                 self.spinner_verb = None;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
+                self.stream_segments.clear();
                 self.invalidate_transcript();
                 let err_msg = format!("Error: {}", msg);
                 self.push_assistant_message(err_msg.clone());

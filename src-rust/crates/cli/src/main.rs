@@ -2040,6 +2040,11 @@ async fn run_interactive(
                         // Start async query
                         app.is_streaming = true;
                         app.streaming_text.clear();
+                        // Clear previous turn's stream segments so the new turn
+                        // starts fresh. (Segments are kept after TurnComplete
+                        // to avoid a visual rerender.)
+                        app.stream_segments.clear();
+                        app.tool_use_blocks.clear();
 
                         let ct = CancellationToken::new();
                         cancel = Some(ct.clone());
@@ -2251,6 +2256,8 @@ async fn run_interactive(
                 let tx = event_tx.clone();
                 let client_clone = client.clone();
                 app.is_streaming = true;
+                app.stream_segments.clear();
+                app.tool_use_blocks.clear();
 
                 let handle = tokio::spawn(async move {
                     let mut msgs = msgs_arc_clone.lock().await.clone();
@@ -2392,6 +2399,8 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                         app.is_streaming = true;
                         app.streaming_text.clear();
+                        app.stream_segments.clear();
+                        app.tool_use_blocks.clear();
                         let ct = CancellationToken::new();
                         cancel = Some(ct.clone());
                         let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));
@@ -2500,6 +2509,8 @@ async fn run_interactive(
                 session.updated_at = chrono::Utc::now();
                 app.is_streaming = true;
                 app.streaming_text.clear();
+                app.stream_segments.clear();
+                app.tool_use_blocks.clear();
                 let ct = CancellationToken::new();
                 cancel = Some(ct.clone());
                 let msgs_arc = Arc::new(tokio::sync::Mutex::new(messages.clone()));

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use crate::agents_view::render_agents_menu;
 use crate::context_viz::render_context_viz;
 use crate::export_dialog::render_export_dialog;
-use crate::app::{App, ContextMenuKind, SystemAnnotation, SystemMessageStyle, ToolStatus};
+use crate::app::{App, ContextMenuKind, StreamSegment, SystemAnnotation, SystemMessageStyle, ToolStatus};
 use crate::rustle::rustle_lines;
 use crate::diff_viewer::render_diff_dialog;
 use crate::model_picker::render_model_picker;
@@ -31,8 +31,8 @@ use crate::mcp_view::render_mcp_view;
 use crate::memory_file_selector::render_memory_file_selector;
 use crate::messages::{
     render_transcript_assistant_message,
-    render_transcript_assistant_meta, render_transcript_live_text, render_transcript_user_message,
-    RenderContext,
+    render_transcript_assistant_meta, render_transcript_live_text, render_transcript_reasoning_block,
+    render_transcript_user_message, RenderContext,
 };
 use crate::notifications::render_notification_banner;
 use crate::overlays::{
@@ -321,6 +321,14 @@ impl VirtualItem for RenderedLineItem {
 
     fn is_section_header(&self) -> bool {
         self.is_header
+    }
+
+    fn content_version(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.search_text.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
@@ -880,11 +888,7 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
         if let Some(na) = notices_area {
             render_startup_notices(frame, app, na);
         }
-    } else if app.messages.is_empty()
-        && app.streaming_text.is_empty()
-        && app.streaming_thinking.is_empty()
-        && app.tool_use_blocks.is_empty()
-    {
+    } else if app.messages.is_empty() && app.stream_segments.is_empty() {
         app.last_msg_area.set(Rect::default());
         app.message_row_map.borrow_mut().clear();
         render_welcome_box(frame, app, content_area);
@@ -1024,20 +1028,6 @@ fn push_blank_item(items: &mut Vec<RenderedLineItem>) {
     push_rendered_items(items, vec![Line::from("")], None, false);
 }
 
-fn render_live_thinking_line(turn: &TranscriptTurn<'_>, frame_count: u64) -> Line<'static> {
-    let mut spans = vec![Span::raw("  ")];
-    spans.extend(shimmer_spans("Thinking", frame_count));
-    if let Some(heading) = turn.reasoning_heading() {
-        spans.push(Span::styled(
-            format!(": {}", heading),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        ));
-    }
-    Line::from(spans)
-}
-
 fn append_turn_items(
     items: &mut Vec<RenderedLineItem>,
     turn: &TranscriptTurn<'_>,
@@ -1055,58 +1045,72 @@ fn append_turn_items(
     );
 
     let mut sections: Vec<(Vec<Line<'static>>, Option<usize>)> = Vec::new();
-    for (message_index, message) in &turn.assistant_messages {
-        let lines = render_transcript_assistant_message(
-            message,
-            &RenderContext {
-                width,
-                highlight: true,
-                show_thinking: false,
-                tool_names: tool_names.clone(),
-                expanded_thinking: expanded_thinking.clone(),
-            },
-        );
-        if !lines.is_empty() {
-            sections.push((lines, Some(*message_index)));
+    // If stream_segments are present (active or just-completed turn),
+    // use them as the sole rendering source — avoids a visual rerender
+    // when the turn transitions from streaming to history.
+    let use_segments = !turn.stream_segments.is_empty();
+    if !use_segments {
+        for (message_index, message) in &turn.assistant_messages {
+            let lines = render_transcript_assistant_message(
+                message,
+                &RenderContext {
+                    width,
+                    highlight: true,
+                    show_thinking: false,
+                    tool_names: tool_names.clone(),
+                    expanded_thinking: expanded_thinking.clone(),
+                },
+            );
+            if !lines.is_empty() {
+                sections.push((lines, Some(*message_index)));
+            }
         }
     }
 
-    for block in &turn.tool_blocks {
-        let mut lines = Vec::new();
-        render_tool_block_lines(&mut lines, block, frame_count);
-        if !lines.is_empty() {
-            sections.push((lines, Some(turn.primary_message_index())));
+    // Render streaming content in chronological order
+    for segment in turn.stream_segments {
+        match segment {
+            StreamSegment::Thinking { content, .. } => {
+                // Render thinking line - returns Vec<Line> directly
+                let lines = render_transcript_reasoning_block(content, false, width);
+                if !lines.is_empty() {
+                    sections.push((lines, Some(turn.primary_message_index())));
+                }
+            }
+            StreamSegment::Text { content, .. } => {
+                // Render text segment
+                let lines = render_transcript_live_text(content, width);
+                if !lines.is_empty() {
+                    sections.push((lines, Some(turn.primary_message_index())));
+                }
+            }
+            StreamSegment::ToolUse { block, .. } => {
+                // Active turn: collapse completed tools into a one-liner
+                // so only the running tool gets the full animated block.
+                if turn.active && block.status == ToolStatus::Done {
+                    let compact = compact_tool_line(block);
+                    sections.push((vec![compact], Some(turn.primary_message_index())));
+                } else {
+                    // Full render for Running/Error tools, or any tool on a
+                    // completed turn.
+                    let mut lines = Vec::new();
+                    render_tool_block_lines(&mut lines, block, frame_count);
+                    if !lines.is_empty() {
+                        sections.push((lines, Some(turn.primary_message_index())));
+                    }
+                }
+            }
         }
     }
 
-    if turn.active && turn.live_thinking.is_some() {
-        sections.push((
-            vec![render_live_thinking_line(turn, frame_count)],
-            Some(turn.primary_message_index()),
-        ));
-    }
-
-    // Show a "Thinking" shimmer when the turn is active but no text or
-    // thinking content has arrived yet — gives visual feedback that the
-    // model is working (especially for providers without thinking support).
-    if turn.active
-        && turn.live_text.is_none()
-        && turn.live_thinking.is_none()
-        && turn.tool_blocks.iter().all(|b| b.status != ToolStatus::Running)
-    {
+    // Show a "Thinking" shimmer when the turn is active but no streaming content has arrived yet
+    if turn.active && turn.stream_segments.is_empty() {
         let mut spans = vec![Span::raw("  ")];
         spans.extend(shimmer_spans("Thinking", frame_count));
         sections.push((
             vec![Line::from(spans)],
             Some(turn.primary_message_index()),
         ));
-    }
-
-    if let Some(text) = turn.live_text {
-        let lines = render_transcript_live_text(text, width);
-        if !lines.is_empty() {
-            sections.push((lines, Some(turn.primary_message_index())));
-        }
     }
 
     if !turn.active {
@@ -1132,14 +1136,17 @@ fn append_turn_items(
 }
 
 fn render_message_items(app: &App, width: u16) -> Vec<RenderedLineItem> {
-    let streaming = app.is_streaming
-        || !app.streaming_text.is_empty()
-        || !app.streaming_thinking.is_empty();
     let has_running_tool_blocks = app
-        .tool_use_blocks
+        .stream_segments
         .iter()
+        .filter_map(|segment| match segment {
+            StreamSegment::ToolUse { block, .. } => Some(block),
+            _ => None,
+        })
         .any(|block| block.status == ToolStatus::Running);
-    let cacheable = !streaming && !has_running_tool_blocks;
+    let cacheable = !app.is_streaming
+        && app.stream_segments.is_empty()
+        && !has_running_tool_blocks;
 
     // Fast path: nothing live — use the full-result cache (ptr-stable check).
     let full_key = MessageLinesCacheKey {
@@ -1224,12 +1231,14 @@ fn render_message_items(app: &App, width: u16) -> Vec<RenderedLineItem> {
             index += 1;
         }
 
-        if total == 0 && !app.tool_use_blocks.is_empty() {
-            for block in &app.tool_use_blocks {
-                let mut lines = Vec::new();
-                render_tool_block_lines(&mut lines, block, app.frame_count);
-                push_rendered_items(&mut items, lines, None, false);
-                push_blank_item(&mut items);
+        if total == 0 {
+            for segment in &app.stream_segments {
+                if let StreamSegment::ToolUse { block, .. } = segment {
+                    let mut lines = Vec::new();
+                    render_tool_block_lines(&mut lines, block, app.frame_count);
+                    push_rendered_items(&mut items, lines, None, false);
+                    push_blank_item(&mut items);
+                }
             }
         }
 
@@ -1271,8 +1280,6 @@ fn render_message_items(app: &App, width: u16) -> Vec<RenderedLineItem> {
 
     completed_lines
 }
-
-// â”€â”€ Welcome / startup screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Render the two-column orange round-bordered welcome box (matches TS LogoV2).
 fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
@@ -1497,6 +1504,40 @@ fn render_system_annotation_lines(
 }
 
 // â”€â”€ Tool use block â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// Compact one-liner for a completed tool call during an active turn.
+/// Keeps the display clean: only the *running* tool gets the full block.
+fn compact_tool_line(block: &crate::app::ToolUseBlock) -> Line<'static> {
+    let title = tool_title_past(&block.name);
+    let mut parts = vec![
+        Span::styled("   ~ ".to_string(), Style::default().fg(CLAUDE_ORANGE)),
+        Span::styled(title, Style::default().fg(Color::DarkGray)),
+    ];
+    // Append a short summary if available
+    let input_val: serde_json::Value =
+        serde_json::from_str(&block.input_json).unwrap_or(serde_json::Value::Null);
+    let summary = crate::messages::extract_tool_summary(&block.name, &input_val);
+    if !summary.is_empty() {
+        parts.push(Span::styled(format!(" {}", summary), Style::default().fg(Color::DarkGray)));
+    }
+    Line::from(parts)
+}
+
+/// Past-tense title for a completed tool (used by the compact renderer).
+fn tool_title_past(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "bash" | "powershell" => "Ran command",
+        "read" => "Read file",
+        "write" | "apply_patch" => "Wrote file",
+        "edit" => "Edited file",
+        "glob" | "list" => "Listed files",
+        "grep" | "codesearch" => "Searched code",
+        "webfetch" => "Fetched page",
+        "websearch" => "Searched web",
+        "task" | "agent" => "Completed task",
+        _ => name,
+    }.to_string()
+}
 
 fn render_tool_block_lines(lines: &mut Vec<Line<'static>>, block: &crate::app::ToolUseBlock, frame_count: u64) {
     let input_val: serde_json::Value =

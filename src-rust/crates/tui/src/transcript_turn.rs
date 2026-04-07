@@ -1,4 +1,4 @@
-use crate::app::{App, ToolStatus, ToolUseBlock, TurnMetadata};
+use crate::app::{App, StreamSegment, ToolStatus, TurnMetadata};
 use claurst_core::types::{ContentBlock, Message, Role};
 
 #[derive(Debug)]
@@ -8,9 +8,7 @@ pub struct TranscriptTurn<'a> {
     pub end_message_index: usize,
     pub user_message: &'a Message,
     pub assistant_messages: Vec<(usize, &'a Message)>,
-    pub tool_blocks: Vec<&'a ToolUseBlock>,
-    pub live_text: Option<&'a str>,
-    pub live_thinking: Option<&'a str>,
+    pub stream_segments: &'a [StreamSegment],
     pub metadata: Option<&'a TurnMetadata>,
     pub active: bool,
 }
@@ -25,15 +23,17 @@ impl<'a> TranscriptTurn<'a> {
     }
 
     pub fn has_visible_assistant_content(&self) -> bool {
-        !self.assistant_messages.is_empty()
-            || !self.tool_blocks.is_empty()
-            || self.live_text.is_some()
-            || self.live_thinking.is_some()
+        !self.assistant_messages.is_empty() || !self.stream_segments.is_empty()
     }
 
     pub fn reasoning_heading(&self) -> Option<String> {
-        if let Some(text) = self.live_thinking.and_then(reasoning_heading) {
-            return Some(text);
+        // Check streaming segments for thinking content
+        for segment in self.stream_segments {
+            if let StreamSegment::Thinking { content, .. } = segment {
+                if let Some(text) = reasoning_heading(content) {
+                    return Some(text);
+                }
+            }
         }
 
         for (_, message) in self.assistant_messages.iter().rev() {
@@ -136,38 +136,18 @@ pub fn build_transcript_turns(app: &App) -> Vec<TranscriptTurn<'_>> {
                     .into_iter()
                     .filter_map(|index| app.messages.get(index).map(|message| (index, message)))
                     .collect(),
-                tool_blocks: Vec::new(),
-                live_text: None,
-                live_thinking: None,
+                stream_segments: &[],
                 metadata: app.turn_metadata.get(draft.ordinal),
                 active: false,
             })
         })
         .collect();
 
-    for block in &app.tool_use_blocks {
-        if let Some(target) = block
-            .turn_index
-            .and_then(|ordinal| turns.iter_mut().find(|turn| turn.ordinal == ordinal))
-        {
-            target.tool_blocks.push(block);
-            continue;
-        }
-
-        if let Some(last) = turns.last_mut() {
-            last.tool_blocks.push(block);
-        }
-    }
-
     if let Some(last) = turns.last_mut() {
-        if !app.streaming_text.is_empty() {
-            last.live_text = Some(app.streaming_text.as_str());
-        }
-        if !app.streaming_thinking.is_empty() {
-            last.live_thinking = Some(app.streaming_thinking.as_str());
-        }
-
-        last.active = app.is_streaming || last.tool_blocks.iter().any(|block| block.status == ToolStatus::Running);
+        last.stream_segments = &app.stream_segments;
+        last.active = app.is_streaming || app.stream_segments.iter().any(|segment| {
+            matches!(segment, StreamSegment::ToolUse { block, .. } if block.status == ToolStatus::Running)
+        });
     }
 
     turns

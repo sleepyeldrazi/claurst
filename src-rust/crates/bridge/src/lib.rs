@@ -22,6 +22,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -94,7 +95,11 @@ impl JwtClaims {
         let exp = self.exp?;
         let now = chrono::Utc::now().timestamp();
         let diff = exp - now;
-        if diff > 0 { Some(diff) } else { None }
+        if diff > 0 {
+            Some(diff)
+        } else {
+            None
+        }
     }
 }
 
@@ -198,8 +203,8 @@ impl BridgeConfig {
         let mut config = Self::default();
 
         // URL override (sets enabled implicitly)
-        if let Ok(url) = std::env::var("CLAURST_BRIDGE_URL")
-            .or_else(|_| std::env::var("CLAUDE_BRIDGE_BASE_URL"))
+        if let Ok(url) =
+            std::env::var("CLAURST_BRIDGE_URL").or_else(|_| std::env::var("CLAUDE_BRIDGE_BASE_URL"))
         {
             if !url.is_empty() {
                 config.server_url = url;
@@ -361,9 +366,7 @@ pub enum BridgeEvent {
         code: Option<String>,
     },
     /// Response to a `Ping` message.
-    Pong {
-        server_time: Option<u64>,
-    },
+    Pong { server_time: Option<u64> },
     /// Session lifecycle state change.
     SessionState {
         session_id: String,
@@ -407,10 +410,7 @@ impl BridgeSession {
         let session_id = uuid::Uuid::new_v4().to_string();
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent(format!(
-                "claude-code-rust/{}",
-                env!("CARGO_PKG_VERSION")
-            ))
+            .user_agent(format!("claude-code-rust/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to build reqwest client");
 
@@ -451,10 +451,7 @@ impl BridgeSession {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Bridge register: no session token"))?;
 
-        let url = format!(
-            "{}/api/claude_code/sessions",
-            self.config.server_url
-        );
+        let url = format!("{}/api/claude_code/sessions", self.config.server_url);
 
         let body = serde_json::json!({
             "session_id": self.session_id,
@@ -508,13 +505,7 @@ impl BridgeSession {
 
         debug!(session_id = %self.session_id, "Deregistering bridge session");
 
-        match self
-            .http
-            .delete(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-        {
+        match self.http.delete(&url).bearer_auth(token).send().await {
             Ok(r) if r.status().is_success() => {
                 info!(session_id = %self.session_id, "Bridge session deregistered");
             }
@@ -663,9 +654,8 @@ impl BridgeSession {
     ) {
         info!(session_id = %self.session_id, "Bridge poll loop started");
 
-        let base_interval = std::time::Duration::from_millis(
-            self.config.polling_interval_ms.max(500),
-        );
+        let base_interval =
+            std::time::Duration::from_millis(self.config.polling_interval_ms.max(500));
         let max_backoff = std::time::Duration::from_secs(60);
 
         loop {
@@ -841,7 +831,8 @@ async fn start_bridge_with_client(
     String,
 )> {
     if !config.is_active() {
-        anyhow::bail!("start_bridge: bridge is not active (enabled={}, token={})",
+        anyhow::bail!(
+            "start_bridge: bridge is not active (enabled={}, token={})",
             config.enabled,
             config.session_token.is_some()
         );
@@ -886,7 +877,11 @@ pub struct BridgeSessionInfo {
 
 impl std::fmt::Display for BridgeSessionInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BridgeSessionInfo {{ session_id: {}, session_url: {} }}", self.session_id, self.session_url)
+        write!(
+            f,
+            "BridgeSessionInfo {{ session_id: {}, session_url: {} }}",
+            self.session_id, self.session_url
+        )
     }
 }
 
@@ -1019,7 +1014,11 @@ pub async fn start_bridge_session(
             anyhow::bail!(
                 "Bridge session registration failed: server returned HTTP {}. {}",
                 status,
-                if body_text.is_empty() { String::new() } else { format!("Response: {}", &body_text[..body_text.len().min(200)]) }
+                if body_text.is_empty() {
+                    String::new()
+                } else {
+                    format!("Response: {}", &body_text[..body_text.len().min(200)])
+                }
             );
         }
     }
@@ -1086,7 +1085,10 @@ pub async fn poll_bridge_messages(
         let status = resp.status().as_u16();
         match status {
             200 => {
-                let text = resp.text().await.context("poll_bridge_messages: reading body")?;
+                let text = resp
+                    .text()
+                    .await
+                    .context("poll_bridge_messages: reading body")?;
                 if text.trim().is_empty() || text.trim() == "[]" {
                     return Ok(vec![]);
                 }
@@ -1098,10 +1100,16 @@ pub async fn poll_bridge_messages(
             429 => {
                 attempt += 1;
                 if attempt > max_retries {
-                    anyhow::bail!("poll_bridge_messages: rate-limited (HTTP 429) after {} retries", max_retries);
+                    anyhow::bail!(
+                        "poll_bridge_messages: rate-limited (HTTP 429) after {} retries",
+                        max_retries
+                    );
                 }
                 let backoff = std::time::Duration::from_millis(1_000 * 2u64.pow(attempt - 1));
-                warn!(attempt, "Bridge poll rate-limited; backing off {:?}", backoff);
+                warn!(
+                    attempt,
+                    "Bridge poll rate-limited; backing off {:?}", backoff
+                );
                 tokio::time::sleep(backoff).await;
                 continue;
             }
@@ -1186,10 +1194,7 @@ pub async fn post_bridge_response(
 ///
 /// Errors are returned to the caller, who should treat them as transient and
 /// ignore them so the query loop is never blocked.
-pub async fn post_bridge_event(
-    info: &BridgeSessionInfo,
-    payload: String,
-) -> anyhow::Result<()> {
+pub async fn post_bridge_event(info: &BridgeSessionInfo, payload: String) -> anyhow::Result<()> {
     let server_url = std::env::var("CLAURST_BRIDGE_URL")
         .or_else(|_| std::env::var("CLAUDE_BRIDGE_BASE_URL"))
         .unwrap_or_else(|_| "https://claude.ai".to_string());
@@ -1232,10 +1237,7 @@ pub async fn post_bridge_event(
         debug!(session_id = %info.session_id, "Bridge event posted");
         Ok(())
     } else {
-        anyhow::bail!(
-            "post_bridge_event: server returned HTTP {}",
-            status
-        )
+        anyhow::bail!("post_bridge_event: server returned HTTP {}", status)
     }
 }
 
@@ -1377,10 +1379,7 @@ pub async fn run_bridge_loop(
                 let msg = e.to_string();
                 if msg.contains("auth error") || msg.contains("401") || msg.contains("403") {
                     let _ = tui_tx
-                        .send(TuiBridgeEvent::Error(format!(
-                            "Bridge auth failed: {}",
-                            e
-                        )))
+                        .send(TuiBridgeEvent::Error(format!("Bridge auth failed: {}", e)))
                         .await;
                     return Err(e);
                 }
@@ -1436,7 +1435,9 @@ pub async fn run_bridge_loop(
     // Spawn the low-level poll loop in its own task.
     let poll_cancel = cancel.clone();
     tokio::spawn(async move {
-        session.run_poll_loop(msg_tx, bridge_ev_rx, poll_cancel).await;
+        session
+            .run_poll_loop(msg_tx, bridge_ev_rx, poll_cancel)
+            .await;
     });
 
     // Message ID counter for outbound text deltas.
@@ -1607,6 +1608,593 @@ pub mod jwt {
 pub use reqwest;
 
 // ---------------------------------------------------------------------------
+// Transport module (WebSocket, SSE, Hybrid)
+// ---------------------------------------------------------------------------
+
+pub mod transport;
+
+// Re-export transport types
+pub use transport::{
+    create_transport, select_transport_type, ControlRequestDetails, ControlResponseDetails,
+    FileAttachment, HybridTransport, InboundMessage, OutboundMessage, SessionState, SseTransport,
+    Transport, TransportError, TransportType, Usage, WebSocketTransport,
+};
+
+// ---------------------------------------------------------------------------
+// Remote Session Management (mirrors remoteBridgeCore.ts / bridgeMain.ts)
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use tokio::time::Instant;
+
+/// Remote credentials for CCR v2
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteCredentials {
+    pub worker_jwt: String,
+    pub api_base_url: String,
+    pub expires_in: u64,
+    pub worker_epoch: u64,
+}
+
+impl RemoteCredentials {
+    /// Parse from JSON response, handling int64-as-string from protojson
+    pub fn from_json(mut value: serde_json::Value) -> anyhow::Result<Self> {
+        // Handle worker_epoch as either string or number
+        let worker_epoch = if let Some(s) = value.get("worker_epoch").and_then(|v| v.as_str()) {
+            s.parse().unwrap_or(0)
+        } else {
+            value
+                .get("worker_epoch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
+
+        Ok(Self {
+            worker_jwt: value["worker_jwt"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing worker_jwt"))?
+                .to_string(),
+            api_base_url: value["api_base_url"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing api_base_url"))?
+                .to_string(),
+            expires_in: value["expires_in"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("Missing expires_in"))?,
+            worker_epoch,
+        })
+    }
+}
+
+/// Session handle for active remote sessions
+#[derive(Debug)]
+pub struct RemoteSessionHandle {
+    pub session_id: String,
+    pub worker_epoch: u64,
+    pub access_token: String,
+    pub created_at: Instant,
+}
+
+/// Remote session manager (mirrors bridgeMain.ts functionality)
+pub struct RemoteSessionManager {
+    http: reqwest::Client,
+    base_url: String,
+    org_uuid: String,
+    active_sessions: Arc<RwLock<HashMap<String, RemoteSessionHandle>>>,
+}
+
+impl RemoteSessionManager {
+    pub fn new(base_url: impl Into<String>, org_uuid: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(format!("claude-code-rust/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            http,
+            base_url: base_url.into(),
+            org_uuid: org_uuid.into(),
+            active_sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new code session (CCR v2)
+    /// POST /v1/code/sessions
+    pub async fn create_code_session(
+        &self,
+        access_token: &str,
+        title: &str,
+    ) -> anyhow::Result<String> {
+        let url = format!("{}/v1/code/sessions", self.base_url);
+
+        let body = serde_json::json!({
+            "title": title,
+            "bridge": {},
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(access_token)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "environments-2025-11-01")
+            .header("x-organization-uuid", &self.org_uuid)
+            .json(&body)
+            .send()
+            .await
+            .context("create_code_session: HTTP POST failed")?;
+
+        let status = resp.status().as_u16();
+        match status {
+            200 | 201 => {
+                let json: serde_json::Value = resp.json().await?;
+                let session_id = json["session"]["id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing session.id in response"))?;
+                Ok(session_id.to_string())
+            }
+            401 | 403 => anyhow::bail!("create_code_session: auth error (HTTP {})", status),
+            _ => anyhow::bail!("create_code_session: server returned HTTP {}", status),
+        }
+    }
+
+    /// Fetch remote credentials for a session
+    /// POST /v1/code/sessions/{id}/bridge
+    pub async fn fetch_remote_credentials(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        trusted_device_token: Option<&str>,
+    ) -> anyhow::Result<RemoteCredentials> {
+        let url = format!("{}/v1/code/sessions/{}/bridge", self.base_url, session_id);
+
+        let mut request = self
+            .http
+            .post(&url)
+            .bearer_auth(access_token)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "environments-2025-11-01")
+            .header("x-organization-uuid", &self.org_uuid);
+
+        if let Some(token) = trusted_device_token {
+            request = request.header("X-Trusted-Device-Token", token);
+        }
+
+        let resp = request
+            .send()
+            .await
+            .context("fetch_remote_credentials: HTTP POST failed")?;
+
+        let status = resp.status().as_u16();
+        match status {
+            200 | 201 => {
+                let json: serde_json::Value = resp.json().await?;
+                RemoteCredentials::from_json(json)
+            }
+            401 | 403 => anyhow::bail!("fetch_remote_credentials: auth error (HTTP {})", status),
+            404 => anyhow::bail!("fetch_remote_credentials: session not found (HTTP 404)"),
+            _ => anyhow::bail!("fetch_remote_credentials: server returned HTTP {}", status),
+        }
+    }
+
+    /// Register worker for a session
+    /// POST /v1/code/sessions/{id}/worker/register
+    pub async fn register_worker(
+        &self,
+        session_id: &str,
+        access_token: &str,
+    ) -> anyhow::Result<u64> {
+        let url = format!(
+            "{}/v1/code/sessions/{}/worker/register",
+            self.base_url, session_id
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(access_token)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "environments-2025-11-01")
+            .send()
+            .await
+            .context("register_worker: HTTP POST failed")?;
+
+        let status = resp.status().as_u16();
+        match status {
+            200 | 201 => {
+                let json: serde_json::Value = resp.json().await?;
+                let epoch = if let Some(s) = json["worker_epoch"].as_str() {
+                    s.parse().unwrap_or(0)
+                } else {
+                    json["worker_epoch"].as_u64().unwrap_or(0)
+                };
+                Ok(epoch)
+            }
+            401 | 403 => anyhow::bail!("register_worker: auth error (HTTP {})", status),
+            _ => anyhow::bail!("register_worker: server returned HTTP {}", status),
+        }
+    }
+
+    /// Report worker state
+    /// PUT /v1/code/sessions/{id}/worker
+    pub async fn report_worker_state(
+        &self,
+        session_id: &str,
+        access_token: &str,
+        state: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v1/code/sessions/{}/worker", self.base_url, session_id);
+
+        let mut body = serde_json::json!({
+            "worker_status": state,
+        });
+
+        if let Some(meta) = metadata {
+            body["external_metadata"] = meta;
+        }
+
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+            .context("report_worker_state: HTTP PUT failed")?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            anyhow::bail!("report_worker_state: HTTP {}", resp.status())
+        }
+    }
+
+    /// Report event delivery status
+    /// POST /v1/code/sessions/{id}/worker/events/{event_id}/delivery
+    pub async fn report_delivery(
+        &self,
+        session_id: &str,
+        event_id: &str,
+        access_token: &str,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/v1/code/sessions/{}/worker/events/{}/delivery",
+            self.base_url, session_id, event_id
+        );
+
+        let body = serde_json::json!({ "status": status });
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+            .context("report_delivery: HTTP POST failed")?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            anyhow::bail!("report_delivery: HTTP {}", resp.status())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JWT Token Refresh Scheduler (mirrors jwtUtils.ts)
+// ---------------------------------------------------------------------------
+
+const TOKEN_REFRESH_BUFFER_MS: u64 = 5 * 60 * 1000; // 5 minutes before expiry
+const FALLBACK_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1000; // 30 minutes
+const MAX_REFRESH_FAILURES: u32 = 3;
+const REFRESH_RETRY_DELAY_MS: u64 = 60_000; // 1 minute
+
+/// Token refresh scheduler for managing JWT lifetimes
+pub struct TokenRefreshScheduler {
+    timers: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    failure_counts: Arc<RwLock<HashMap<String, u32>>>,
+    refresh_buffer_ms: u64,
+}
+
+impl TokenRefreshScheduler {
+    pub fn new() -> Self {
+        Self {
+            timers: Arc::new(RwLock::new(HashMap::new())),
+            failure_counts: Arc::new(RwLock::new(HashMap::new())),
+            refresh_buffer_ms: TOKEN_REFRESH_BUFFER_MS,
+        }
+    }
+
+    /// Schedule a token refresh for a session
+    pub fn schedule<F>(&self, session_id: impl Into<String>, token: &str, on_refresh: F)
+    where
+        F: FnOnce(String) + Send + 'static,
+    {
+        let session_id = session_id.into();
+        let session_id_clone = session_id.clone();
+
+        // Cancel any existing timer
+        self.cancel(&session_id);
+
+        // Decode expiry
+        let delay = if let Some(exp) = decode_jwt_expiry(token) {
+            let now = chrono::Utc::now().timestamp();
+            let refresh_at = exp - (self.refresh_buffer_ms / 1000) as i64;
+            let delay_secs = refresh_at - now;
+            if delay_secs > 0 {
+                Duration::from_secs(delay_secs as u64)
+            } else {
+                Duration::from_secs(30) // Minimum 30s delay if already expired
+            }
+        } else {
+            Duration::from_millis(FALLBACK_REFRESH_INTERVAL_MS)
+        };
+
+        let timers = self.timers.clone();
+        let session_id_for_insert = session_id.clone();
+        let session_id_for_remove = session_id.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            on_refresh(session_id_clone);
+            // Cleanup
+            timers.write().remove(&session_id_for_remove);
+        });
+
+        self.timers.write().insert(session_id_for_insert, handle);
+    }
+
+    /// Schedule from explicit expires_in seconds
+    pub fn schedule_from_expires_in<F>(
+        &self,
+        session_id: impl Into<String>,
+        expires_in_secs: u64,
+        on_refresh: F,
+    ) where
+        F: FnOnce(String) + Send + 'static,
+    {
+        let session_id = session_id.into();
+        let session_id_clone = session_id.clone();
+
+        self.cancel(&session_id);
+
+        let delay = expires_in_secs * 1000;
+        let delay = if delay > self.refresh_buffer_ms {
+            Duration::from_millis(delay - self.refresh_buffer_ms)
+        } else {
+            Duration::from_secs(30) // Minimum 30s
+        };
+
+        let timers = self.timers.clone();
+        let session_id_for_insert = session_id.clone();
+        let session_id_for_remove = session_id.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            on_refresh(session_id_clone);
+            timers.write().remove(&session_id_for_remove);
+        });
+
+        self.timers.write().insert(session_id_for_insert, handle);
+    }
+
+    /// Cancel refresh for a session
+    pub fn cancel(&self, session_id: &str) {
+        if let Some(handle) = self.timers.write().remove(session_id) {
+            handle.abort();
+        }
+        self.failure_counts.write().remove(session_id);
+    }
+
+    /// Cancel all scheduled refreshes
+    pub fn cancel_all(&self) {
+        let mut timers = self.timers.write();
+        for (_, handle) in timers.drain() {
+            handle.abort();
+        }
+        self.failure_counts.write().clear();
+    }
+}
+
+impl Default for TokenRefreshScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session ID Compatibility (mirrors sessionIdCompat.ts)
+// ---------------------------------------------------------------------------
+
+/// Convert CSE (infrastructure) session ID to compat session ID
+/// "cse_abc123" -> "session_abc123"
+pub fn to_compat_session_id(id: &str) -> String {
+    if id.starts_with("cse_") {
+        id.replacen("cse_", "session_", 1)
+    } else {
+        id.to_string()
+    }
+}
+
+/// Convert compat session ID to infrastructure session ID
+/// "session_abc123" -> "cse_abc123"
+pub fn to_infra_session_id(id: &str) -> String {
+    if id.starts_with("session_") {
+        id.replacen("session_", "cse_", 1)
+    } else {
+        id.to_string()
+    }
+}
+
+/// Compare two session IDs regardless of prefix
+pub fn same_session_id(a: &str, b: &str) -> bool {
+    let body_a = a.rsplit_once('_').map(|(_, b)| b).unwrap_or(a);
+    let body_b = b.rsplit_once('_').map(|(_, b)| b).unwrap_or(b);
+    body_a.len() >= 4 && body_b.len() >= 4 && body_a == body_b
+}
+
+// ---------------------------------------------------------------------------
+// Bridge API Client (mirrors bridgeApi.ts)
+// ---------------------------------------------------------------------------
+
+/// Bridge API client for environment-based bridge
+pub struct BridgeApiClient {
+    http: reqwest::Client,
+    base_url: String,
+    get_access_token: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    runner_version: String,
+}
+
+impl BridgeApiClient {
+    pub fn new<F>(
+        base_url: impl Into<String>,
+        get_access_token: F,
+        runner_version: impl Into<String>,
+    ) -> Self
+    where
+        F: Fn() -> Option<String> + Send + Sync + 'static,
+    {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            http,
+            base_url: base_url.into(),
+            get_access_token: Box::new(get_access_token),
+            runner_version: runner_version.into(),
+        }
+    }
+
+    fn auth_headers(&self) -> anyhow::Result<Vec<(&str, String)>> {
+        let token = (self.get_access_token)().ok_or_else(|| anyhow::anyhow!("No access token"))?;
+        Ok(vec![
+            ("Authorization", format!("Bearer {}", token)),
+            ("Content-Type", "application/json".to_string()),
+            ("anthropic-version", "2023-06-01".to_string()),
+            ("anthropic-beta", "environments-2025-11-01".to_string()),
+            ("x-environment-runner-version", self.runner_version.clone()),
+        ])
+    }
+
+    /// Register bridge environment
+    /// POST /v1/environments/bridge
+    pub async fn register_bridge_environment(
+        &self,
+        config: &BridgeConfig,
+    ) -> anyhow::Result<(String, String)> {
+        let url = format!("{}/v1/environments/bridge", self.base_url);
+
+        let body = serde_json::json!({
+            "machine_name": config.device_id.clone(), // Using device_id as machine_name
+            "directory": ".", // Would be passed in config
+            "branch": "main", // Would be passed in config
+            "max_sessions": 4,
+            "metadata": { "worker_type": "claude_code" },
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .headers(self.build_headers().await?)
+            .json(&body)
+            .send()
+            .await
+            .context("register_bridge_environment: HTTP POST failed")?;
+
+        let status = resp.status().as_u16();
+        match status {
+            200 | 201 => {
+                let json: serde_json::Value = resp.json().await?;
+                let env_id = json["environment_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing environment_id"))?
+                    .to_string();
+                let env_secret = json["environment_secret"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing environment_secret"))?
+                    .to_string();
+                Ok((env_id, env_secret))
+            }
+            401 | 403 => anyhow::bail!("register_bridge_environment: auth error (HTTP {})", status),
+            _ => anyhow::bail!(
+                "register_bridge_environment: server returned HTTP {}",
+                status
+            ),
+        }
+    }
+
+    /// Deregister environment
+    /// DELETE /v1/environments/bridge/{id}
+    pub async fn deregister_environment(&self, environment_id: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/v1/environments/bridge/{}",
+            self.base_url, environment_id
+        );
+
+        let resp = self
+            .http
+            .delete(&url)
+            .headers(self.build_headers().await?)
+            .send()
+            .await
+            .context("deregister_environment: HTTP DELETE failed")?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            warn!("deregister_environment returned HTTP {}", resp.status());
+            Ok(()) // Best-effort
+        }
+    }
+
+    async fn build_headers(&self) -> anyhow::Result<reqwest::header::HeaderMap> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in self.auth_headers()? {
+            headers.insert(key.parse::<reqwest::header::HeaderName>()?, value.parse()?);
+        }
+        Ok(headers)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded UUID Set for deduplication (mirrors bridgeMessaging.ts)
+// ---------------------------------------------------------------------------
+
+/// FIFO-bounded ring buffer for UUID deduplication
+pub struct BoundedUUIDSet {
+    capacity: usize,
+    items: std::collections::VecDeque<String>,
+}
+
+impl BoundedUUIDSet {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            items: std::collections::VecDeque::with_capacity(capacity),
+        }
+    }
+
+    pub fn add(&mut self, uuid: impl Into<String>) {
+        let uuid = uuid.into();
+        if self.items.len() >= self.capacity {
+            self.items.pop_front();
+        }
+        self.items.push_back(uuid);
+    }
+
+    pub fn has(&self, uuid: &str) -> bool {
+        self.items.contains(&uuid.to_string())
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+}
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1706,7 +2294,9 @@ mod tests {
 
     #[test]
     fn test_bridge_event_pong_serde() {
-        let ev = BridgeEvent::Pong { server_time: Some(1_700_000_000) };
+        let ev = BridgeEvent::Pong {
+            server_time: Some(1_700_000_000),
+        };
         let j = serde_json::to_string(&ev).unwrap();
         assert!(j.contains(r#""type":"pong""#));
     }
