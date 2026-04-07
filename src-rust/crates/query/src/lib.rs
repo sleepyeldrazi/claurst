@@ -1258,6 +1258,48 @@ pub async fn run_query_loop(
                         continue; // loop for next turn
                     }
 
+                    // Thinking-only recovery: some OpenAI-compatible models
+                    // (e.g. Qwen via llama.cpp) may emit reasoning tokens but
+                    // then stop with finish_reason="stop" and no text/tool_calls.
+                    // The reasoning is lost (OpenAI format has no way to pass it
+                    // back), so the model produced nothing useful. Inject a
+                    // continuation nudge and retry.
+                    if content_blocks.is_empty() && max_tokens_recovery_count < MAX_TOKENS_RECOVERY_LIMIT {
+                        max_tokens_recovery_count += 1;
+                        warn!(
+                            attempt = max_tokens_recovery_count,
+                            "provider path: thinking-only response, injecting continuation"
+                        );
+                        // Remove the empty assistant message we just pushed
+                        messages.pop();
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(QueryEvent::Status(format!(
+                                "Model returned empty response — retrying ({}/{})",
+                                max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
+                            )));
+                        }
+                        messages.push(Message::user("Continue your analysis. Pick up where you left off.".to_string()));
+                        continue;
+                    }
+
+                    // Max-tokens recovery for the provider path: mirror the
+                    // Anthropic path's continuation logic.
+                    if stop_str == "max_tokens" && max_tokens_recovery_count < MAX_TOKENS_RECOVERY_LIMIT {
+                        max_tokens_recovery_count += 1;
+                        warn!(
+                            attempt = max_tokens_recovery_count,
+                            "provider path: max_tokens hit — injecting continuation"
+                        );
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(QueryEvent::Status(format!(
+                                "Output token limit hit — continuing ({}/{})",
+                                max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
+                            )));
+                        }
+                        messages.push(Message::user(MAX_TOKENS_RECOVERY_MSG));
+                        continue;
+                    }
+
                     // End turn — notify TUI and return.
                     if let Some(ref tx) = event_tx {
                         let _ = tx.send(QueryEvent::TurnComplete {
