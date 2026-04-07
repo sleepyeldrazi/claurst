@@ -365,7 +365,7 @@ impl GoToLineDialog {
 }
 
 /// Status of an active or completed tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
     Done,
@@ -5029,15 +5029,27 @@ impl App {
                 if remaining > 0 {
                     preview.push_str(&format!("\n\u{2026} {} more lines", remaining));
                 }
+                let new_status = if is_error {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Done
+                };
+                // Update tool_use_blocks (used for has_running checks)
                 if let Some(block) =
                     self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id)
                 {
-                    block.status = if is_error {
-                        ToolStatus::Error
-                    } else {
-                        ToolStatus::Done
-                    };
-                    block.output_preview = Some(preview);
+                    block.status = new_status;
+                    block.output_preview = Some(preview.clone());
+                }
+                // Also update the cloned block inside stream_segments
+                // so the renderer sees the correct status.
+                for segment in &mut self.stream_segments {
+                    if let StreamSegment::ToolUse { block, .. } = segment {
+                        if block.id == tool_id {
+                            block.status = new_status;
+                            block.output_preview = Some(preview.clone());
+                        }
+                    }
                 }
                 self.invalidate_transcript();
                 if is_error {
@@ -5069,10 +5081,17 @@ impl App {
                 self.last_turn_verb = Some(sample_completion_verb(seed));
                 self.flush_streamed_assistant_message();
                 self.tool_use_blocks.retain(|b| b.status != ToolStatus::Running);
-                // Mark all remaining tool blocks as Done (they were running
-                // but the turn is over).
+                // Mark any remaining tool blocks as Done (safety net — they
+                // should have been updated by ToolEnd already).
                 for block in &mut self.tool_use_blocks {
                     block.status = ToolStatus::Done;
+                }
+                for segment in &mut self.stream_segments {
+                    if let StreamSegment::ToolUse { block, .. } = segment {
+                        if block.status == ToolStatus::Running {
+                            block.status = ToolStatus::Done;
+                        }
+                    }
                 }
                 // DON'T clear stream_segments — they stay as the rendering
                 // source so the display doesn't rerender/shift when the turn
